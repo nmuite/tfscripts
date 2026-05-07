@@ -1,0 +1,92 @@
+######## SCRIPT EXPLANATION ###########
+
+
+Lines 1–18 — Shebang & Header Comment
+The script starts with #!/usr/bin/env bash to ensure it runs with Bash. The block comment describes what the script does: it discovers AWS resources and produces three outputs — a CSV inventory, Terraform HCL resource stubs, and Terraform import blocks (for terraform import in TF ≥ 1.5).
+
+Line 20 — Shell Safety Options
+bashset -uo pipefail
+
+-u — treats unset variables as errors
+-o pipefail — causes a pipeline to fail if any command in it fails (not just the last)
+
+-e (exit on error) is intentionally omitted so the script can handle AWS call failures gracefully.
+
+Lines 22–24 — Colour Variables
+Defines ANSI escape codes for terminal colouring: RED, GREEN, YELLOW, CYAN, BOLD, and NC (no colour / reset). These are used throughout for visual output.
+
+Lines 26–38 — Default Configuration
+Sets up all the configurable defaults:
+
+PROFILE — AWS CLI profile (defaults to "default")
+REGIONS — empty array, populated later
+ALL_REGIONS — flag for scanning all regions
+IMPORT_BLOCKS — whether to generate imports.tf
+CONCURRENCY — parallel workers (default 4)
+TIMESTAMP — used to version output filenames
+OUT_DIR, CSV_FILE, TF_DIR, IMPORTS_FILE, SUMMARY_FILE — all output paths derived from the timestamp
+TOTAL_RESOURCES — counter, starts at 0
+
+
+Lines 40–50 — Argument Parsing
+A while loop processes CLI flags passed to the script:
+
+--profile → sets the AWS CLI profile
+--region → appends to the REGIONS array (repeatable)
+--all-regions → sets the flag to scan every enabled region
+--concurrency → sets parallel worker count
+--no-import-blocks → disables imports.tf generation
+Any unknown flag causes the script to exit with an error
+
+
+Lines 52–58 — Prerequisite Check
+Verifies that both aws (AWS CLI v2) and jq are installed. If either is missing, it prints a red error and exits immediately.
+
+Lines 60–68 — Safe AWS Call Helpers
+Two wrapper functions around the aws CLI:
+
+aws_safe — runs any AWS command with the configured profile; on failure it silently returns "null" instead of crashing
+aws_region — same, but also accepts a --region parameter for region-specific calls
+
+
+Lines 70–106 — Utility Helper Functions
+Four small helpers:
+
+log_section — prints a bold yellow section header to the terminal
+add_csv — appends a row to the CSV file; uses flock (file locking) to prevent garbled output from parallel workers; also increments TOTAL_RESOURCES
+get_name_tag — extracts the Name tag value from an AWS Tags JSON array using jq
+render_tags_hcl — converts an AWS Tags JSON array into valid HCL tags = { ... } syntax for Terraform
+
+
+Lines 104–106 — sanitise_label
+Cleans a string into a valid Terraform resource label: lowercased, non-alphanumeric characters replaced with _, leading digits prefixed with _, and truncated to 60 characters.
+
+Lines 108–131 — write_tf_stub
+Writes a Terraform resource block to a per-service .tf file (e.g. ec2.tf, s3.tf). If the file doesn't exist yet, it first writes a standard header with the terraform {} provider block. Uses flock for safe concurrent writes. Each resource block includes a lifecycle { prevent_destroy = true } guard.
+
+Lines 133–142 — write_import_block
+Writes a native HCL import {} block (Terraform ≥ 1.5 syntax) to imports.tf. Skips writing if IMPORT_BLOCKS is false. Also uses flock for concurrency safety.
+
+Lines 144–149 — emit_resource
+A convenience wrapper that calls both write_tf_stub and write_import_block in one shot — the typical pattern used when a resource is discovered.
+
+Lines 151–168 — Banner & Authentication Check
+Prints a decorative CLI banner, then calls aws sts get-caller-identity via aws_safe. If it returns "null" (auth failure), the script exits. On success, it extracts and displays the Account ID and Caller ARN (the IAM identity being used).
+
+Lines 170–182 — Region Resolution
+Determines which regions to scan:
+
+If --all-regions was passed: queries AWS for all enabled regions and populates the REGIONS array
+If no regions were specified: reads the default region from the AWS CLI config (falls back to us-east-1)
+
+Then prints how many regions will be scanned and whether import blocks are enabled.
+
+Lines 184–198 — Output Directory & File Initialisation
+
+Creates the output directories (OUT_DIR and TF_DIR) with mkdir -p
+Writes the CSV header row to the CSV file
+If import blocks are enabled, writes the header comment to imports.tf explaining how to use it with Terraform
+
+
+Line 200 — Section Separator
+Just a # ===...=== comment line marking the end of setup and the beginning of the per-region scanning logic that follows.

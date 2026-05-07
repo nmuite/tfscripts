@@ -233,40 +233,38 @@ done < <(aws_safe iam list-users | jq -c '.Users[]?' 2>/dev/null || true)
 echo -e "  ${GREEN}✓${NC} ${COUNT} IAM users"
 
 # ── IAM Roles ─────────────────────────────────────────────────────────────────
-log_section "IAM Roles"
-COUNT=0
-while IFS= read -r role; do
-  [[ -z "$role" || "$role" == "null" ]] && continue
-  id=$(echo "$role"       | jq -r '.RoleName // ""');   [[ -z "$id" ]] && continue
-  arn=$(echo "$role"      | jq -r '.Arn // ""')
-  path=$(echo "$role"     | jq -r '.Path // "/"')
-  desc=$(echo "$role"     | jq -r '.Description // ""')
-
-  DETAIL=$(aws_safe iam get-role --role-name "$id")
-  tags_json=$(echo "$DETAIL" | jq -c '.Role.Tags // []')
-  tags_hcl=$(render_tags_hcl "$tags_json")
-
-  # Inline the assume-role policy document
-  assume_policy=$(echo "$DETAIL" | jq -r '.Role.AssumeRolePolicyDocument | @json' 2>/dev/null \
-    | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" \
-    2>/dev/null || echo "")
-
-  POLICIES=$(aws_safe iam list-attached-role-policies --role-name "$id" \
-    | jq -r '[.AttachedPolicies[].PolicyName] | join(",")' 2>/dev/null || true)
-
-  add_csv "IAM Role" "$id" "$id" "global" "$arn" "active" \
-    "Path=${path},AttachedPolicies=${POLICIES}"
-
-  attrs="  name        = \"${id}\"\n  path        = \"${path}\""
-  [[ -n "$desc" ]] && attrs="${attrs}\n  description = \"${desc}\""
-  [[ -n "$assume_policy" ]] && attrs="${attrs}\n  # assume_role_policy = <<POLICY\n  # ${assume_policy}\n  # POLICY"
-  [[ -n "$tags_hcl" ]] && attrs="${attrs}\n${tags_hcl}"
-
-  emit_resource "iam" "aws_iam_role" "$id" "$(sanitise_label "role_${id}")" "global" \
-    "$(printf '%b' "$attrs")"
-  ((COUNT++)) || true
-done < <(aws_safe iam list-roles | jq -c '.Roles[]?' 2>/dev/null || true)
-echo -e "  ${GREEN}✓${NC} ${COUNT} IAM roles"
+#log_section "IAM Roles"
+#COUNT=0
+#while IFS= read -r role; do
+#  [[ -z "$role" || "$role" == "null" ]] && continue
+#  id=$(echo "$role"       | jq -r '.RoleName // ""');   [[ -z "$id" ]] && continue
+#  arn=$(echo "$role"      | jq -r '.Arn // ""')
+#  path=$(echo "$role"     | jq -r '.Path // "/"')
+#  desc=$(echo "$role"     | jq -r '.Description // ""')
+#
+#  DETAIL=$(aws_safe iam get-role --role-name "$id")
+#  tags_json=$(echo "$DETAIL" | jq -c '.Role.Tags // []')
+#  tags_hcl=$(render_tags_hcl "$tags_json")
+#
+#  # Inline the assume-role policy document
+#  assume_policy=$(echo "$DETAIL" | jq -r '.Role.AssumeRolePolicyDocument | @json' 2>/dev/null \
+#    | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" \
+#    2>/dev/null || echo "")
+#
+#  POLICIES=$(aws_safe iam list-attached-role-policies --role-name "$id" \
+#    | jq -r '[.AttachedPolicies[].PolicyName] | join(",")' 2>/dev/null || true)
+#
+#  add_csv "IAM Role" "$id" "$id" "global" "$arn" "active" \
+#    "Path=${path},AttachedPolicies=${POLICIES}"
+###  [[ -n "$desc" ]] && attrs="${attrs}\n  description = \"${desc}\""
+##  [[ -n "$tags_hcl" ]] && attrs="${attrs}\n${tags_hcl}"
+#
+#  emit_resource "iam" "aws_iam_role" "$id" "$(sanitise_label "role_${id}")" "global" \
+#    "$(printf '%b' "$attrs")"
+#  ((COUNT++)) || true
+#done < <(aws_safe iam list-roles | jq -c '.Roles[]?' 2>/dev/null || true)
+#echo -e "  ${GREEN}✓${NC} ${COUNT} IAM roles"
+#
 
 # ── S3 Buckets ────────────────────────────────────────────────────────────────
 log_section "S3 Buckets"
