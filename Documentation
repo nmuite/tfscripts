@@ -1,0 +1,22 @@
+#!/bin/bash
+# ==============================================================================
+# Script Name:  cloud-to-terraform-IaC
+# Description:  Interrogates cloud environments, inventories deployed resources,
+#               and generates Terraform import blocks and HCL definitions.
+#
+# Architect:    Nicholas G Muite
+# Engine:       Logic designed by Nicholas G Muite via Anthropic Claude
+# Version:      1.4.0
+# ==============================================================================
+#
+#
+# Example README.md Snippet
+#====================================================================================
+#If you are sharing this tool, use this format to explain the AI/Human collaboration:
+#Development Notes
+#
+#    Workflow: This script was authored by providing specific cloud architecture patterns to an AI, which #generated the boilerplate loop logic.
+#    Human Oversight: Manual refinement was applied to ensure the sed and awk parsing of cloud tags correctly #formats Terraform resource names.
+#    Liability: The user is responsible for reviewing all generated .tf files before running terraform apply.
+#    
+#    

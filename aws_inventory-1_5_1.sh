@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+umask 022  # Ensure all created files/dirs are world-readable
 # =============================================================================
 # AWS Infrastructure Inventory Script  (v2 — full attrs + import blocks)
 # Discovers resources across your AWS account and outputs:
@@ -30,7 +31,7 @@ ALL_REGIONS=false
 IMPORT_BLOCKS=true
 CONCURRENCY=4
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUT_DIR="aws_inventory_${TIMESTAMP}"
+OUT_DIR="$(pwd)/aws_inventory_${TIMESTAMP}"
 CSV_FILE="${OUT_DIR}/aws_inventory_${TIMESTAMP}.csv"
 TF_DIR="${OUT_DIR}/terraform_stubs"
 IMPORTS_FILE="${TF_DIR}/imports.tf"
@@ -406,21 +407,86 @@ while IFS= read -r dist; do
   enabled=$(echo "$dist"     | jq -r '.Enabled // true')
   aliases=$(echo "$dist"     | jq -r '[.Aliases.Items[]?] | join(",")' 2>/dev/null || true)
 
-  # Origins
-  origins=$(echo "$dist" | jq -r '[.Origins.Items[]?.DomainName] | join(",")' 2>/dev/null || true)
+  # Fetch full distribution config for required block details
+  dist_config=$(aws_safe cloudfront get-distribution --id "$id" | jq -c '.Distribution.DistributionConfig' 2>/dev/null || echo "null")
+
+  # Origins — build one origin block per origin
+  origins_hcl=""
+  while IFS= read -r origin; do
+    [[ -z "$origin" || "$origin" == "null" ]] && continue
+    o_id=$(echo "$origin"     | jq -r '.Id // ""')
+    o_domain=$(echo "$origin" | jq -r '.DomainName // ""')
+    o_path=$(echo "$origin"   | jq -r '.OriginPath // ""')
+    s3_oai=$(echo "$origin"   | jq -r '.S3OriginConfig.OriginAccessIdentity // ""')
+    custom_proto=$(echo "$origin" | jq -r '.CustomOriginConfig.OriginProtocolPolicy // ""')
+    origins_hcl="${origins_hcl}\n\n  origin {\n    origin_id   = \"${o_id}\"\n    domain_name = \"${o_domain}\""
+    [[ -n "$o_path" ]]       && origins_hcl="${origins_hcl}\n    origin_path = \"${o_path}\""
+    if [[ -n "$s3_oai" ]]; then
+      origins_hcl="${origins_hcl}\n    s3_origin_config { origin_access_identity = \"${s3_oai}\" }"
+    elif [[ -n "$custom_proto" ]]; then
+      origins_hcl="${origins_hcl}\n    custom_origin_config {\n      http_port              = 80\n      https_port             = 443\n      origin_protocol_policy = \"${custom_proto}\"\n      origin_ssl_protocols   = [\"TLSv1.2\"]\n    }"
+    fi
+    origins_hcl="${origins_hcl}\n  }"
+  done < <(echo "$dist_config" | jq -c '.Origins.Items[]?' 2>/dev/null || true)
+
+  # Default cache behaviour
+  dcb=$(echo "$dist_config" | jq -c '.DefaultCacheBehavior // {}' 2>/dev/null || echo "{}")
+  dcb_target=$(echo "$dcb"      | jq -r '.TargetOriginId // ""')
+  dcb_proto=$(echo "$dcb"       | jq -r '.ViewerProtocolPolicy // "redirect-to-https"')
+  dcb_compress=$(echo "$dcb"    | jq -r '.Compress // false')
+  dcb_methods=$(echo "$dcb"     | jq -r '[.AllowedMethods.Items[]?] | join(",")' 2>/dev/null || echo "GET,HEAD")
+  dcb_cached=$(echo "$dcb"      | jq -r '[.AllowedMethods.CachedMethods.Items[]?] | join(",")' 2>/dev/null || echo "GET,HEAD")
+  dcb_cache_policy=$(echo "$dcb" | jq -r '.CachePolicyId // ""')
+  dcb_origin_req=$(echo "$dcb"  | jq -r '.OriginRequestPolicyId // ""')
+  dcb_ttl_min=$(echo "$dcb"     | jq -r '.MinTTL // 0')
+  dcb_ttl_default=$(echo "$dcb" | jq -r '.DefaultTTL // 86400')
+  dcb_ttl_max=$(echo "$dcb"     | jq -r '.MaxTTL // 31536000')
+
+  dcb_hcl="\n\n  default_cache_behavior {\n    target_origin_id       = \"${dcb_target}\"\n    viewer_protocol_policy = \"${dcb_proto}\"\n    compress               = ${dcb_compress}\n    allowed_methods        = [\"${dcb_methods//,/\",\"}\"]\n    cached_methods         = [\"${dcb_cached//,/\",\"}\"]"
+  if [[ -n "$dcb_cache_policy" ]]; then
+    dcb_hcl="${dcb_hcl}\n    cache_policy_id        = \"${dcb_cache_policy}\""
+  else
+    dcb_hcl="${dcb_hcl}\n    min_ttl                = ${dcb_ttl_min}\n    default_ttl            = ${dcb_ttl_default}\n    max_ttl                = ${dcb_ttl_max}\n    forwarded_values {\n      query_string = false\n      cookies { forward = \"none\" }\n    }"
+  fi
+  [[ -n "$dcb_origin_req" ]] && dcb_hcl="${dcb_hcl}\n    origin_request_policy_id = \"${dcb_origin_req}\""
+  dcb_hcl="${dcb_hcl}\n  }"
+
+  # Restrictions
+  restriction_type=$(echo "$dist_config" | jq -r '.Restrictions.GeoRestriction.RestrictionType // "none"' 2>/dev/null || echo "none")
+  restriction_locs=$(echo "$dist_config" | jq -r '[.Restrictions.GeoRestriction.Items[]?] | join(",")' 2>/dev/null || true)
+  restrictions_hcl="\n\n  restrictions {\n    geo_restriction {\n      restriction_type = \"${restriction_type}\""
+  [[ -n "$restriction_locs" ]] && restrictions_hcl="${restrictions_hcl}\n      locations        = [\"${restriction_locs//,/\",\"}\"]"
+  restrictions_hcl="${restrictions_hcl}\n    }\n  }"
+
+  # Viewer certificate
+  cert_acm=$(echo "$dist_config"    | jq -r '.ViewerCertificate.ACMCertificateArn // ""' 2>/dev/null || true)
+  cert_iam=$(echo "$dist_config"    | jq -r '.ViewerCertificate.IAMCertificateId // ""' 2>/dev/null || true)
+  cert_ssl=$(echo "$dist_config"    | jq -r '.ViewerCertificate.SSLSupportMethod // "sni-only"' 2>/dev/null || echo "sni-only")
+  cert_tls=$(echo "$dist_config"    | jq -r '.ViewerCertificate.MinimumProtocolVersion // "TLSv1.2_2021"' 2>/dev/null || echo "TLSv1.2_2021")
+  cert_cf=$(echo "$dist_config"     | jq -r '.ViewerCertificate.CloudFrontDefaultCertificate // false' 2>/dev/null || echo "false")
+  if [[ "$cert_cf" == "true" ]]; then
+    viewer_cert_hcl="\n\n  viewer_certificate {\n    cloudfront_default_certificate = true\n  }"
+  elif [[ -n "$cert_acm" ]]; then
+    viewer_cert_hcl="\n\n  viewer_certificate {\n    acm_certificate_arn      = \"${cert_acm}\"\n    ssl_support_method       = \"${cert_ssl}\"\n    minimum_protocol_version = \"${cert_tls}\"\n  }"
+  elif [[ -n "$cert_iam" ]]; then
+    viewer_cert_hcl="\n\n  viewer_certificate {\n    iam_certificate_id       = \"${cert_iam}\"\n    ssl_support_method       = \"${cert_ssl}\"\n    minimum_protocol_version = \"${cert_tls}\"\n  }"
+  else
+    viewer_cert_hcl="\n\n  viewer_certificate {\n    cloudfront_default_certificate = true\n  }"
+  fi
 
   # Tags (CloudFront tags are on the ARN)
   tags_json=$(aws_safe cloudfront list-tags-for-resource --resource "$arn" \
     | jq -c '.Tags.Items // []' | jq -c '[.[] | {Key: .Key, Value: .Value}]' 2>/dev/null || echo "[]")
   tags_hcl=$(render_tags_hcl "$tags_json")
 
+  origins=$(echo "$dist_config" | jq -r '[.Origins.Items[]?.DomainName] | join(",")' 2>/dev/null || true)
   add_csv "CloudFront" "$id" "${aliases:-$domain}" "global" "$arn" "$status" \
     "Domain=${domain},Origins=${origins},PriceClass=${price_class},Enabled=${enabled}"
 
   attrs="  enabled         = ${enabled}\n  price_class     = \"${price_class}\"\n  http_version    = \"${http_version}\""
   [[ -n "$comment" ]]    && attrs="${attrs}\n  comment         = \"${comment}\""
-  [[ -n "$aliases" ]]    && attrs="${attrs}\n  # aliases       = [\"${aliases}\"]"
-  attrs="${attrs}\n\n  # TODO: define origin, default_cache_behavior after import"
+  [[ -n "$aliases" ]]    && attrs="${attrs}\n  aliases         = [\"${aliases//,/\",\"}\"]"
+  attrs="${attrs}${origins_hcl}${dcb_hcl}${restrictions_hcl}${viewer_cert_hcl}"
   [[ -n "$tags_hcl" ]]   && attrs="${attrs}\n${tags_hcl}"
 
   emit_resource "cloudfront" "aws_cloudfront_distribution" "$id" \
@@ -806,7 +872,7 @@ scan_region() {
     [[ -n "$sg_ids" ]]         && attrs="${attrs}\n  vpc_security_group_ids  = [\"${sg_ids//,/\",\"}\"]"
     [[ -n "$backup_window" ]]  && attrs="${attrs}\n  backup_window           = \"${backup_window}\""
     [[ -n "$maint_window" ]]   && attrs="${attrs}\n  maintenance_window      = \"${maint_window}\""
-    attrs="${attrs}\n  # username / password must be set separately (use aws_ssm_parameter or Secrets Manager)"
+    attrs="${attrs}\n  username                = \"# TODO: replace — e.g. admin\""\n  # password must be set separately; use a sensitive variable or Secrets Manager reference
     [[ -n "$tags_hcl" ]]       && attrs="${attrs}\n${tags_hcl}"
 
     emit_resource "rds" "aws_db_instance" "$id" \
@@ -853,7 +919,7 @@ scan_region() {
     [[ -n "$sg_ids" ]]      && attrs="${attrs}\n  vpc_security_group_ids          = [\"${sg_ids//,/\",\"}\"]"
     [[ -n "$backup_window" ]] && attrs="${attrs}\n  preferred_backup_window         = \"${backup_window}\""
     [[ -n "$maint_window" ]] && attrs="${attrs}\n  preferred_maintenance_window    = \"${maint_window}\""
-    attrs="${attrs}\n  # master_username / master_password — set via Secrets Manager reference"
+    attrs="${attrs}\n  master_username         = \"# TODO: replace — e.g. admin\""\n  # master_password must be set separately; use a sensitive variable or Secrets Manager reference
     [[ -n "$tags_hcl" ]]    && attrs="${attrs}\n${tags_hcl}"
 
     emit_resource "rds" "aws_rds_cluster" "$id" \
@@ -933,7 +999,7 @@ scan_region() {
     env_keys=$(echo "$fn" | jq -r '[.Environment.Variables // {} | keys[]] | join(",")' 2>/dev/null || true)
 
     tags_json=$(aws_region "$REGION" lambda list-tags --resource "$arn" \
-      | jq -c '[to_entries[] | {Key: .key, Value: .value}]' 2>/dev/null || echo "[]")
+      | jq -c '[.Tags // {} | to_entries[] | {Key: .key, Value: .value}]' 2>/dev/null || echo "[]")
     tags_hcl=$(render_tags_hcl "$tags_json")
 
     add_csv "Lambda Function" "$name" "$name" "$REGION" "$arn" "active" \
@@ -947,7 +1013,14 @@ scan_region() {
       attrs="${attrs}\n\n  vpc_config {\n    subnet_ids         = [\"${vpc_subnets//,/\",\"}\"]\n    security_group_ids = [\"${vpc_sgs//,/\",\"}\"]\n  }"
     fi
     [[ -n "$env_keys" ]] && attrs="${attrs}\n\n  environment {\n    variables = {\n      # Keys: ${env_keys}\n      # TODO: fill values (use sensitive() or SSM references)\n    }\n  }"
-    attrs="${attrs}\n\n  # source_code_hash / filename — set after import"
+    # Terraform requires exactly one of filename/image_uri/s3_bucket at plan time.
+    # We use a package_type-aware placeholder so the plan succeeds immediately.
+    if [[ "$package_type" == "Image" ]]; then
+      attrs="${attrs}\n\n  image_uri = \"# TODO: replace with ECR image URI (e.g. 123456789.dkr.ecr.eu-west-1.amazonaws.com/${name}:latest)\""
+    else
+      attrs="${attrs}\n\n  filename         = \"/dev/null\"  # placeholder — Terraform import ignores source; replace with real path or use s3_bucket/s3_key after import"
+      attrs="${attrs}\n  source_code_hash = \"\""
+    fi
     [[ -n "$tags_hcl" ]] && attrs="${attrs}\n${tags_hcl}"
 
     emit_resource "lambda" "aws_lambda_function" "$name" \
@@ -1204,7 +1277,7 @@ scan_region() {
     max_receive=$(echo "$ATTRS"    | jq -r '.RedrivePolicy | if . then (. | fromjson | .maxReceiveCount) else "" end' 2>/dev/null || true)
 
     tags_json=$(aws_region "$REGION" sqs list-queue-tags --queue-url "$url" \
-      | jq -c '[to_entries[] | {Key: .key, Value: .value}]' 2>/dev/null || echo "[]")
+      | jq -c '[.Tags // {} | to_entries[] | {Key: .key, Value: .value}]' 2>/dev/null || echo "[]")
     tags_hcl=$(render_tags_hcl "$tags_json")
 
     add_csv "SQS Queue" "$url" "$name" "$REGION" "$arn" "active" \
@@ -1278,7 +1351,13 @@ scan_region() {
     add_csv "SSM Parameter" "$name" "$name" "$REGION" "$arn" "active" \
       "Type=${type},Tier=${tier},Version=${version},DataType=${data_type}"
 
-    attrs="  name      = \"${name}\"\n  type      = \"${type}\"\n  tier      = \"${tier}\"\n  data_type = \"${data_type}\"\n  # value   = \"\" # fetch separately; SecureString values are encrypted"
+    # SSM value: fetch plaintext for String/StringList; SecureString placeholder only
+    if [[ "$type" == "SecureString" ]]; then
+      ssm_value="# TODO: set via sensitive variable or Secrets Manager — SecureString cannot be read in plaintext"
+    else
+      ssm_value=$(aws_safe ssm get-parameter --name "$name" --query "Parameter.Value" --output text 2>/dev/null || echo "# TODO: could not retrieve value")
+    fi
+    attrs="  name      = \"${name}\"\n  type      = \"${type}\"\n  tier      = \"${tier}\"\n  data_type = \"${data_type}\"\n  value     = \"${ssm_value}\""
     [[ -n "$kms_key" && "$type" == "SecureString" ]] && attrs="${attrs}\n  key_id    = \"${kms_key}\""
     [[ -n "$tags_hcl" ]] && attrs="${attrs}\n${tags_hcl}"
 

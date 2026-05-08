@@ -8,12 +8,12 @@
 # =============================================================================
 # REQUIREMENTS: azure-cli (az), jq
 # USAGE:
-#   chmod +x azure_inventory.sh
-#   ./azure_inventory.sh                                    # current subscription
-#   ./azure_inventory.sh --subscription <id-or-name>        # named subscription
-#   ./azure_inventory.sh --resource-group <rg>              # limit to one RG
-#   ./azure_inventory.sh --all-subscriptions                # scan every subscription
-#   ./azure_inventory.sh --no-import-blocks                 # skip imports.tf
+#   chmod +x azure_inventory_v4.sh
+#   ./azure_inventory_v4.sh                                    # current subscription
+#   ./azure_inventory_v4.sh --subscription <id-or-name>        # named subscription
+#   ./azure_inventory_v4.sh --resource-group <rg>              # limit to one RG
+#   ./azure_inventory_v4.sh --all-subscriptions                # scan every subscription
+#   ./azure_inventory_v4.sh --no-import-blocks                 # skip imports.tf
 # =============================================================================
 
 set -uo pipefail
@@ -143,7 +143,7 @@ emit_resource() {
 
 # ── Auth check ────────────────────────────────────────────────────────────────
 echo -e "${BOLD}${CYAN}┌─────────────────────────────────────────────────┐${NC}"
-echo -e "${BOLD}${CYAN}│   Azure Infrastructure Inventory Tool  (v2)     │${NC}"
+echo -e "${BOLD}${CYAN}│   Azure Infrastructure Inventory Tool  (v4)     │${NC}"
 echo -e "${BOLD}${CYAN}└─────────────────────────────────────────────────┘${NC}"
 echo ""
 
